@@ -161,3 +161,6 @@ cython_debug/
 
 .ruff_cache/
 *.zip
+data/
+cs336_basic.egg-info/
+build/

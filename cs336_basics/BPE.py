@@ -1,86 +1,156 @@
 from collections import defaultdict
+import regex as re
+
 class BPE:
-    def __init__(self, tokens:str, vocab_size:int) -> None:
+    def __init__(self, corpus: str, vocab_size: int, special_tokens: list[str]) -> None:
+        """
+        Initialize BPE tokenizer with corpus, vocab size, and list of special tokens.
+        """
+        self.corpus = corpus
+        self.vocab_size = vocab_size
+        self.special_tokens = special_tokens
 
-        self.tokens:str = tokens
-        self.vocab_size:int = vocab_size
-        self.vocab:dict[int, bytes] = {i:bytes([i]) for i in range(256)}
-        self.merge_sets:dict[int, tuple] = {}
-    
-    def get_tokens(self) -> list[int]:
+        # GPT-style regex pattern
+        self.PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
-        return list(self.tokens.encode("utf-8"))
-    
-    def get_stats(self, tokens:list[int]) -> dict:
+        # Initial byte-level vocab: {0..255}
+        self.vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
+        self.merge_sets: dict[int, tuple[int, int]] = {}
 
-        freq_pair:dict[tuple, int] = defaultdict(int)
-        
-        for fisrt_word, second_word in zip (tokens, tokens[1:]):
-            freq_pair[(fisrt_word, second_word)] += 1
-        return freq_pair
-    
-    def get_most_frequent_pair(self, freq_pair:dict[tuple, int]) -> tuple:
+        # Special token registration
+        self.special_token_to_id: dict[str, int] = {}
+        for i, token in enumerate(special_tokens):
+            token_id = 256 + i
+            self.vocab[token_id] = token.encode("utf-8")
+            self.special_token_to_id[token] = token_id
 
-        pair_result:tuple
-        freq:int = 0
-        for pair, count in freq_pair.items():
-            if count > freq:
-                pair_result = pair
-                freq = count
-        return pair_result
+        # Next token ID (after special tokens)
+        self.next_token_id = 256 + len(special_tokens)
 
-        
-    def merge(self, tokens: list[int], index: int) -> list[int]:
-        
-        freq_pair: dict[tuple, int] = self.get_stats(tokens)
+        # Build pre-token frequency table
+        self.pretoken_table_count: dict[tuple[int, ...], int] = self.get_pre_token_freq_table()
 
-        if not freq_pair:
-            raise ValueError("No frequent pairs found — cannot perform merge. The token list may be too short or already fully merged.")
+    def get_pretoken(self) -> list[str]:
+        return re.findall(self.PAT, self.corpus)
 
-        most_freq_pair = self.get_most_frequent_pair(freq_pair=freq_pair)
-        a, b = most_freq_pair
+    def get_pre_token_freq_table(self) -> dict[tuple[int, ...], int]:
+        """
+        Converts pre-tokens into tuples of bytes and counts their frequency.
+        """
+        freq_pre_tokens = defaultdict(int)
+        for pre_token in self.get_pretoken():
+            pretoken_stream = tuple(pre_token.encode("utf-8"))
+            freq_pre_tokens[pretoken_stream] += 1
+        return freq_pre_tokens
 
-        self.vocab[index] = self.vocab[a] + self.vocab[b]
-        self.merge_sets[index] = (a, b)
+    def get_token_freq_pairs(self) -> tuple[dict[tuple[int, int], int], dict[tuple[int, int], list[tuple[int, ...]]]]:
+        """
+        Count how often each byte pair appears and record where it appeared.
+        """
+        token_pairs = defaultdict(int)
+        index_table = defaultdict(list)
 
-        new_tokens = []
-        i = 0
-        while i < len(tokens):
-            if i < len(tokens) - 1 and tokens[i] == a and tokens[i + 1] == b:
-                new_tokens.append(index)
-                i += 2
-            else:
-                new_tokens.append(tokens[i])
-                i += 1
+        for pretoken, freq in self.pretoken_table_count.items():
+            for token1, token2 in zip(pretoken, pretoken[1:]):
+                token_pairs[(token1, token2)] += freq
+                index_table[(token1, token2)].append(pretoken)
 
-        return new_tokens
+        return token_pairs, index_table
 
-    def train(self) -> None:
+    def update_pre_token_table(self, most_frequent: tuple[int, int], pretokens_appeared: list[tuple[int, ...]]) -> None:
+        """
+        Merge the most frequent token pair in all affected pre-tokens.
+        """
+        token1, token2 = most_frequent
+        new_token_id = self.next_token_id
+        self.next_token_id += 1
 
-        tokens:list[int] = self.get_tokens()
-        num_merges:int = self.vocab_size - 256
-        for i in range(num_merges):
-            index:int = i + 256
-            tokens = self.merge(tokens, index)
-    
-    def decode(self, tokens: list[int]) -> str:
-        byte_sequence = b''.join(self.vocab[token] for token in tokens)
-        return byte_sequence.decode("utf-8", errors="replace")
+        new_token_bytes = self.vocab[token1] + self.vocab[token2]
+        self.vocab[new_token_id] = new_token_bytes
+        self.merge_sets[new_token_id] = (token1, token2)
 
-    def tokenize(self, text: str) -> list[int]:
-        tokens = list(text.encode("utf-8"))
-
-        for index in sorted(self.merge_sets.keys()):
-            a, b = self.merge_sets[index]
+        for pretoken in pretokens_appeared:
+            freq = self.pretoken_table_count[pretoken]
+            new_pre_token = []
             i = 0
-            merged = []
-            while i < len(tokens):
-                if i < len(tokens) - 1 and tokens[i] == a and tokens[i + 1] == b:
-                    merged.append(index)
+            while i < len(pretoken):
+                if i < len(pretoken) - 1 and pretoken[i] == token1 and pretoken[i + 1] == token2:
+                    new_pre_token.append(new_token_id)
                     i += 2
                 else:
-                    merged.append(tokens[i])
+                    new_pre_token.append(pretoken[i])
                     i += 1
-            tokens = merged
+            del self.pretoken_table_count[pretoken]
+            self.pretoken_table_count[tuple(new_pre_token)] += freq
 
-        return tokens
+    def merge(self) -> None:
+        """
+        Iteratively perform merges until reaching the target vocab size.
+        """
+        while len(self.vocab) < self.vocab_size:
+            pair_freq, pair_index = self.get_token_freq_pairs()
+            if not pair_freq:
+                break
+            most_frequent = max(pair_freq.items(), key=lambda x: x[1])[0]
+            pretokens_appeared = pair_index[most_frequent]
+            self.update_pre_token_table(most_frequent, pretokens_appeared)
+
+    def encode(self, text: str) -> list[int]:
+        """
+        Tokenizes new input text using the trained merge rules.
+        """
+        pre_tokens:list[str] = re.findall(self.PAT, text)
+        encoded_tokens:list[int] = []
+
+        for token in pre_tokens:
+            if token in self.special_token_to_id:
+                encoded_tokens.append(self.special_token_to_id[token])
+            else:
+                byte_sequence = list(token.encode("utf-8"))
+                byte_sequence = self.apply_merges(byte_sequence)
+                encoded_tokens.extend(byte_sequence)
+
+        return encoded_tokens
+
+    def apply_merges(self, byte_sequence: list[int]) -> list[int]:
+        """
+        Applies learned BPE merges to a sequence of byte-level token IDs.
+        """
+        merges = sorted(self.merge_sets.items())  # Sort by token_id
+
+        for token_id, (a, b) in merges:
+            i = 0
+            new_sequence = []
+            while i < len(byte_sequence):
+                if i < len(byte_sequence) - 1 and byte_sequence[i] == a and byte_sequence[i + 1] == b:
+                    new_sequence.append(token_id)
+                    i += 2
+                else:
+                    new_sequence.append(byte_sequence[i])
+                    i += 1
+            byte_sequence = new_sequence
+
+        return byte_sequence
+
+    def decode(self, tokens: list[int]) -> str:
+        """
+        Converts token IDs back into a string using the vocab mapping.
+        """
+        byte_stream = b''.join(self.vocab.get(token, b'') for token in tokens)
+        return byte_stream.decode("utf-8", errors="replace")
+
+    def print_vocab(self):
+        """
+        Print all tokens in the vocab.
+        """
+        print(" Vocabulary:")
+        for tid in sorted(self.vocab.keys()):
+            print(f"{tid}: {self.vocab[tid]}")
+
+    def print_merges(self):
+        """
+        Print all merge rules.
+        """
+        print(" Merge rules:")
+        for tid, pair in sorted(self.merge_sets.items()):
+            print(f"{tid}: {pair}")

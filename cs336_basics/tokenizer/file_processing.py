@@ -1,8 +1,9 @@
 import os
-from typing import BinaryIO
+from typing import Any
+from collections import defaultdict
 
 def find_chunk_boundaries(
-    file: BinaryIO, 
+    file: Any, 
     desired_num_chunks: int, 
     split_special_token: bytes
 ) -> list[int]:
@@ -49,3 +50,7 @@ def find_chunk_boundaries(
     # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
     return sorted(set(chunk_boundaries))
 
+<<<<<<< HEAD:cs336_basics/tokenizer/file_processing.py
+=======
+
+>>>>>>> fe6d09d416589830f340c6b82cc6dd35b40280aa:cs336_basics/file_processing.py
